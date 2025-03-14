@@ -1,0 +1,343 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 12%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 12%;
+
+    --primary: 328 100% 45%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 12%;
+
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 45%;
+
+    --accent: 0 0% 96%;
+    --accent-foreground: 0 0% 12%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 0 0% 90%;
+    --input: 0 0% 90%;
+    --ring: 328 100% 45%;
+
+    --radius: 0.5rem;
+
+    --polkadot-pink: rgb(230, 0, 122);
+    --polkadot-cyan: rgb(0, 178, 255);
+    --polkadot-purple: rgb(99, 2, 172);
+    --font-unbounded: 'Unbounded', sans-serif;
+  }
+
+  .dark {
+    --background: 0 0% 12%;
+    --foreground: 0 0% 100%;
+
+    --card: 0 0% 16%;
+    --card-foreground: 0 0% 100%;
+
+    --popover: 0 0% 16%;
+    --popover-foreground: 0 0% 100%;
+
+    --primary: 328 100% 45%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 0 0% 16%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 0 0% 16%;
+    --muted-foreground: 0 0% 65%;
+
+    --accent: 0 0% 16%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 0 0% 20%;
+    --input: 0 0% 20%;
+    --ring: 328 100% 45%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-unbounded), system-ui, sans-serif;
+  }
+  .heading {
+    font-family: var(--font-unbounded), system-ui, sans-serif;
+    font-weight: 700;
+  }
+}
+
+/* Web3 and Polkadot specific styles */
+.polkadot-gradient {
+  background: linear-gradient(90deg, #e6007a 0%, #552bbf 100%);
+}
+
+.web3-dark-gradient {
+  background: linear-gradient(145deg, #080808 0%, #121212 100%);
+}
+
+/* Grid patterns */
+.cyber-grid {
+  background-image: 
+    radial-gradient(rgba(0, 178, 255, 0.1) 1px, transparent 1px),
+    radial-gradient(rgba(0, 178, 255, 0.1) 1px, transparent 1px);
+  background-size: 40px 40px;
+  background-position: 0 0, 20px 20px;
+}
+
+.cyber-grid-small {
+  background-image: 
+    radial-gradient(rgba(0, 178, 255, 0.1) 1px, transparent 1px),
+    radial-gradient(rgba(0, 178, 255, 0.1) 1px, transparent 1px);
+  background-size: 20px 20px;
+  background-position: 0 0, 10px 10px;
+}
+
+/* Glow effects */
+.glow-text {
+  text-shadow: 0 0 10px rgba(0, 178, 255, 0.5), 0 0 20px rgba(0, 178, 255, 0.3);
+}
+
+.glow-text-pink {
+  text-shadow: 0 0 10px rgba(230, 0, 122, 0.5), 0 0 20px rgba(230, 0, 122, 0.3);
+}
+
+.glow-border {
+  box-shadow: 0 0 10px rgba(0, 178, 255, 0.3), inset 0 0 5px rgba(0, 178, 255, 0.1);
+  border: 1px solid rgba(0, 178, 255, 0.3);
+}
+
+.glow-border-pink {
+  box-shadow: 0 0 10px rgba(230, 0, 122, 0.3), inset 0 0 5px rgba(230, 0, 122, 0.1);
+  border: 1px solid rgba(230, 0, 122, 0.3);
+}
+
+.glow-effect {
+  position: relative;
+  z-index: 1;
+  overflow: hidden;
+}
+
+.glow-effect::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 178, 255, 0.3);
+  filter: blur(15px);
+  opacity: 0.5;
+}
+
+.glow-effect-pink {
+  position: relative;
+  z-index: 1;
+  overflow: hidden;
+}
+
+.glow-effect-pink::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(230, 0, 122, 0.3);
+  filter: blur(15px);
+  opacity: 0.5;
+}
+
+/* Card components */
+.polkadot-card {
+  @apply rounded-xl border border-[#1a1a1a] bg-[#0a0a0a] p-6 shadow-md backdrop-blur-sm;
+}
+
+.web3-card {
+  @apply rounded-lg border border-[#1a1a1a] bg-[#0a0a0a]/80 p-6 backdrop-blur-sm;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+  transition: all 0.3s ease;
+}
+
+.web3-card:hover {
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.5), 0 0 10px rgba(0, 178, 255, 0.2);
+  border-color: rgba(0, 178, 255, 0.3);
+}
+
+/* Button styles */
+.polkadot-button {
+  @apply rounded-full bg-polkadot-pink text-white hover:bg-opacity-90 transition-all;
+}
+
+.web3-button {
+  @apply rounded-md border border-[#1a1a1a] bg-[#0a0a0a]/60 text-white px-4 py-2 transition-all duration-300 relative overflow-hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.web3-button::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(0, 178, 255, 0.1), transparent);
+  transition: left 0.6s;
+}
+
+.web3-button:hover {
+  @apply border-[#00B2FF];
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), 0 0 10px rgba(0, 178, 255, 0.2);
+}
+
+.web3-button:hover::before {
+  left: 100%;
+}
+
+.polkadot-input {
+  @apply rounded-xl border border-border bg-background;
+}
+
+/* Animation classes */
+@keyframes pulse-glow {
+  0% {
+    box-shadow: 0 0 5px rgba(0, 178, 255, 0.5), 0 0 10px rgba(0, 178, 255, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 10px rgba(0, 178, 255, 0.7), 0 0 20px rgba(0, 178, 255, 0.5);
+  }
+  100% {
+    box-shadow: 0 0 5px rgba(0, 178, 255, 0.5), 0 0 10px rgba(0, 178, 255, 0.3);
+  }
+}
+
+@keyframes pulse-glow-pink {
+  0% {
+    box-shadow: 0 0 5px rgba(230, 0, 122, 0.5), 0 0 10px rgba(230, 0, 122, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 10px rgba(230, 0, 122, 0.7), 0 0 20px rgba(230, 0, 122, 0.5);
+  }
+  100% {
+    box-shadow: 0 0 5px rgba(230, 0, 122, 0.5), 0 0 10px rgba(230, 0, 122, 0.3);
+  }
+}
+
+.animate-glow {
+  animation: pulse-glow 3s infinite;
+}
+
+.animate-glow-pink {
+  animation: pulse-glow-pink 3s infinite;
+}
+
+/* Background patterns */
+.hexagon-pattern {
+  background-color: #080808;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='49' viewBox='0 0 28 49'%3E%3Cg fill-rule='evenodd'%3E%3Cg id='hexagons' fill='%2300b2ff' fill-opacity='0.05' fill-rule='nonzero'%3E%3Cpath d='M13.99 9.25l13 7.5v15l-13 7.5L1 31.75v-15l12.99-7.5zM3 17.9v12.7l10.99 6.34 11-6.35V17.9l-11-6.34L3 17.9zM0 15l12.98-7.5V0h-2v6.35L0 12.69v2.3zm0 18.5L12.98 41v8h-2v-6.85L0 35.81v-2.3zM15 0v7.5L27.99 15H28v-2.31h-.01L17 6.35V0h-2zm0 49v-8l12.99-7.5H28v2.31h-.01L17 42.15V49h-2z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* Circuit pattern for Web3 backgrounds */
+.circuit-pattern {
+  background-color: #080808;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg fill-rule='evenodd'%3E%3Cg fill='%2300b2ff' fill-opacity='0.05'%3E%3Cpath opacity='.5' d='M96 95h4v1h-4v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4h-9v4h-1v-4H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15v-9H0v-1h15V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h9V0h1v15h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9h4v1h-4v9zm-1 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-9-10h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm9-10v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-9-10h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm9-10v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-9-10h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm9-10v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-10 0v-9h-9v9h9zm-9-10h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9zm10 0h9v-9h-9v9z'/%3E%3Cpath d='M6 5V0H5v5H0v1h5v94h1V6h94V5H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* Futuristic animations */
+@keyframes blink {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-15px); }
+}
+
+@keyframes float-slow {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-25px); }
+}
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.1); }
+}
+
+@keyframes grow-width {
+  0% { width: 0%; }
+  100% { width: var(--final-width, 42%); }
+}
+
+@keyframes chart-bar {
+  0% { height: 0%; }
+  100% { height: var(--bar-height); }
+}
+
+/* Apply animations */
+.animate-blink {
+  animation: blink 1.2s infinite;
+}
+
+.animate-float {
+  animation: float 10s ease-in-out infinite;
+}
+
+.animate-float-slow {
+  animation: float-slow 15s ease-in-out infinite;
+}
+
+.animate-pulse-slow {
+  animation: pulse-slow 8s ease-in-out infinite;
+}
+
+.animate-grow-width {
+  animation: grow-width 1.5s ease-out forwards;
+}
+
+.animate-chart-bar {
+  animation: chart-bar 1s ease-out forwards;
+  --bar-height: var(--height, 50%);
+}
+
+/* Neo-brutalism elements */
+.neo-brutalism-button {
+  position: relative;
+  border-radius: 6px;
+  box-shadow: 4px 4px 0px rgba(0, 0, 0, 0.8);
+  transform: translate(-2px, -2px);
+  transition: all 0.2s ease;
+}
+
+.neo-brutalism-button:hover {
+  transform: translate(0, 0);
+  box-shadow: 0px 0px 0px rgba(0, 0, 0, 0.8);
+}
+
+.circuit-pattern {
+  background-image: 
+    radial-gradient(circle at 25px 25px, rgba(0, 178, 255, 0.2) 2px, transparent 0),
+    linear-gradient(to right, rgba(230, 0, 122, 0.1) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(230, 0, 122, 0.1) 1px, transparent 1px);
+  background-size: 50px 50px;
+}

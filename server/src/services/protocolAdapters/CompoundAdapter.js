@@ -1,0 +1,1086 @@
+const axios = require('axios');
+const { ethers } = require('ethers');
+const ProtocolAdapter = require('./ProtocolAdapter');
+const logger = require('../../config/logger');
+const apyCalculationService = require('../../utils/apyCalculationService');
+
+// Compound contract ABIs (simplified versions)
+const cTokenABI = [
+  "function mint(uint256 mintAmount) external returns (uint256)",
+  "function redeem(uint256 redeemTokens) external returns (uint256)",
+  "function redeemUnderlying(uint256 redeemAmount) external returns (uint256)",
+  "function balanceOf(address owner) external view returns (uint256)",
+  "function exchangeRateCurrent() external returns (uint256)",
+  "function exchangeRateStored() external view returns (uint256)",
+  "function supplyRatePerBlock() external view returns (uint256)",
+  "function borrowRatePerBlock() external view returns (uint256)",
+  "function underlying() external view returns (address)"
+];
+
+const comptrollerABI = [
+  "function markets(address cToken) external view returns (bool isListed, uint256 collateralFactorMantissa, bool isComped)",
+  "function getAccountLiquidity(address account) external view returns (uint256 error, uint256 liquidity, uint256 shortfall)",
+  "function claimComp(address holder) external",
+  "function compAccrued(address holder) external view returns (uint256)",
+  "function compSpeeds(address cToken) external view returns (uint256)",
+  "function compSupplySpeeds(address cToken) external view returns (uint256)",
+  "function compSupplyState(address) external view returns (uint224 index, uint32 block)"
+];
+
+const erc20ABI = [
+  "function approve(address spender, uint256 amount) public returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function balanceOf(address account) view returns (uint256)",
+  "function decimals() view returns (uint8)"
+];
+
+// Chain providers configuration
+const chainProviders = {
+  '1': process.env.ETH_MAINNET_RPC || 'https://eth-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY', // Ethereum
+  '137': process.env.POLYGON_MAINNET_RPC || 'https://polygon-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY', // Polygon
+  '42161': process.env.ARBITRUM_MAINNET_RPC || 'https://arb-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY' // Arbitrum
+};
+
+// Average blocks per day for each chain
+const blocksPerDay = {
+  '1': 7200, // Ethereum (~12 sec block time)
+  '137': 43200, // Polygon (~2 sec block time)
+  '42161': 675800 // Arbitrum (~0.13 sec block time)
+};
+
+// Price oracle APIs
+const priceOracles = {
+  coingecko: {
+    baseUrl: 'https://api.coingecko.com/api/v3',
+    pricePath: '/simple/token_price/ethereum',
+    proPlan: process.env.COINGECKO_PRO_API_KEY ? true : false,
+    proUrl: 'https://pro-api.coingecko.com/api/v3',
+    apiKey: process.env.COINGECKO_PRO_API_KEY || ''
+  },
+  chainlink: {
+    // Chainlink Price Feed addresses for major assets
+    ethUsd: '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419',
+    daiUsd: '0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9',
+    usdcUsd: '0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6',
+    wbtcUsd: '0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c',
+    compUsd: '0xdbd020CAeF83eFd542f4De03e3cF0C28A4428bd5',
+    abi: [
+      'function latestRoundData() external view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)',
+      'function decimals() external view returns (uint8)'
+    ]
+  },
+  // Fallback price sources
+  defillama: {
+    baseUrl: 'https://coins.llama.fi',
+    pricePath: '/prices/current'
+  }
+};
+
+// Price cache to reduce API calls
+const priceCache = {
+  data: new Map(),
+  expiry: new Map(),
+  cacheDuration: 10 * 60 * 1000 // 10 minutes in milliseconds
+};
+
+// Compound addresses for different chains
+const compoundAddresses = {
+  '1': {
+    comptroller: '0x3d9819210A31b4961b30EF54bE2aeD79B9c9Cd3B',
+    compToken: '0xc00e94Cb662C3520282E6f5717214004A7f26888',
+    lens: '0xdCbDb7306C6Ff46f77B349188dC18cEd9DF30893', // Compound Lens contract for additional data
+    // cTokens will be fetched from the API
+  },
+  // Compound is primarily on Ethereum mainnet, but we can add other chains as they expand
+};
+
+// API endpoints for Compound data
+const compoundApiEndpoints = {
+  markets: 'https://api.compound.finance/api/v2/ctoken'
+};
+
+/**
+ * Compound Protocol Adapter
+ * Provides integration with Compound lending protocol
+ */
+class CompoundAdapter extends ProtocolAdapter {
+  /**
+   * Constructor
+   * @param {Object} config - Configuration for the adapter
+   */
+  constructor(config = {}) {
+    super(config);
+    this.name = 'CompoundAdapter';
+    this.supportedChains = ['1']; // Primarily Ethereum
+    this.compoundVersion = config.version || 'v2';
+    this.cTokens = {}; // Cache for cToken addresses
+    
+    // Configure price oracle
+    this.priceOracle = {
+      primary: config.priceOracle?.primary || 'coingecko',
+      secondary: config.priceOracle?.secondary || 'chainlink',
+      fallback: config.priceOracle?.fallback || 'defillama',
+      cacheDuration: config.priceOracle?.cacheDuration || priceCache.cacheDuration
+    };
+  }
+
+  /**
+   * Gets a provider for the specified chain
+   * @param {string} chainId - Chain ID
+   * @returns {ethers.providers.JsonRpcProvider} - Provider for the chain
+   * @private
+   */
+  _getProvider(chainId) {
+    if (!this.supportsChain(chainId)) {
+      throw new Error(`Chain ${chainId} not supported by Compound adapter`);
+    }
+
+    const providerUrl = chainProviders[chainId];
+    return new ethers.providers.JsonRpcProvider(providerUrl);
+  }
+
+  /**
+   * Gets the comptroller contract for a specific chain
+   * @param {string} chainId - Chain ID
+   * @returns {ethers.Contract} - Comptroller contract
+   * @private
+   */
+  _getComptrollerContract(chainId) {
+    const provider = this._getProvider(chainId);
+    const comptrollerAddress = compoundAddresses[chainId].comptroller;
+    
+    return new ethers.Contract(comptrollerAddress, comptrollerABI, provider);
+  }
+
+  /**
+   * Gets a cToken contract instance
+   * @param {string} chainId - Chain ID
+   * @param {string} cTokenAddress - cToken address
+   * @returns {ethers.Contract} - cToken contract
+   * @private
+   */
+  _getCTokenContract(chainId, cTokenAddress) {
+    const provider = this._getProvider(chainId);
+    return new ethers.Contract(cTokenAddress, cTokenABI, provider);
+  }
+
+  /**
+   * Fetches cToken data from Compound API
+   * @param {string} chainId - Chain ID
+   * @returns {Promise<Array>} - Array of cToken data
+   * @private
+   */
+  async _fetchCTokenData(chainId) {
+    try {
+      // Only Ethereum is fully supported by the official API
+      if (chainId !== '1') {
+        throw new Error(`Compound API does not support chain ${chainId}`);
+      }
+
+      const response = await axios.get(compoundApiEndpoints.markets);
+      
+      // Update cToken cache
+      const cTokens = response.data.cToken;
+      this.cTokens[chainId] = {};
+      
+      for (const cToken of cTokens) {
+        this.cTokens[chainId][cToken.underlying_symbol] = {
+          address: cToken.token_address,
+          underlyingAddress: cToken.underlying_address,
+          symbol: cToken.symbol,
+          decimals: parseInt(cToken.decimals)
+        };
+      }
+      
+      return cTokens;
+    } catch (error) {
+      logger.error(`Error fetching Compound cToken data for chain ${chainId}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Calculates APY from supply rate per block
+   * @param {string} supplyRatePerBlock - Supply rate per block (as BigNumber string)
+   * @param {string} chainId - Chain ID
+   * @returns {number} - Annual Percentage Yield
+   * @private
+   */
+  _calculateApyFromSupplyRate(supplyRatePerBlock, chainId) {
+    try {
+      const supplyRatePerBlockBN = ethers.BigNumber.from(supplyRatePerBlock);
+      const blocksPerYear = blocksPerDay[chainId] * 365;
+      
+      // Convert to ethers.js fraction with 18 decimals
+      const supplyRatePerBlockDecimal = parseFloat(
+        ethers.utils.formatUnits(supplyRatePerBlockBN, 18)
+      );
+      
+      // Calculate APY using the compound interest formula
+      // APY = (1 + rate per block)^blocks per year - 1
+      return apyCalculationService.calculateApy(supplyRatePerBlockDecimal, blocksPerYear);
+    } catch (error) {
+      logger.error(`Error calculating APY from supply rate: ${error.message}`);
+      return 0;
+    }
+  }
+
+  /**
+   * Gets yield opportunities from Compound
+   * @param {string} chainId - Chain ID to query
+   * @returns {Promise<Array>} - Array of yield opportunities
+   */
+  async getYieldOpportunities(chainId) {
+    try {
+      if (!this.supportsChain(chainId)) {
+        return [];
+      }
+
+      // Fetch cToken data from API
+      const cTokenData = await this._fetchCTokenData(chainId);
+      const comptroller = this._getComptrollerContract(chainId);
+      
+      const opportunities = [];
+      
+      for (const cToken of cTokenData) {
+        try {
+          // Skip non-listed markets or markets with issues
+          if (cToken.supply_rate.value === "0") {
+            continue;
+          }
+          
+          // Get on-chain market data
+          const cTokenContract = this._getCTokenContract(chainId, cToken.token_address);
+          const marketData = await comptroller.markets(cToken.token_address);
+          
+          if (!marketData.isListed) {
+            continue;
+          }
+          
+          // Get asset price from oracle
+          const underlyingPrice = await this._getAssetPrice(
+            cToken.underlying_address || ethers.constants.AddressZero,
+            cToken.underlying_symbol,
+            chainId
+          );
+          
+          // Calculate TVL using our price oracle
+          const totalSupply = parseFloat(cToken.total_supply.value);
+          const calculatedTvl = totalSupply * underlyingPrice;
+          
+          // Calculate APY with potential COMP rewards
+          let baseApy = parseFloat(cToken.supply_rate.value) * 100; // Convert from decimal to percentage
+          let compApy = 0;
+          
+          if (marketData.isComped) {
+            try {
+              // Get COMP distribution speed
+              const compSpeed = await comptroller.compSpeeds(cToken.token_address);
+              if (!compSpeed.isZero()) {
+                // Get COMP price
+                const compPrice = await this._getAssetPrice(
+                  compoundAddresses[chainId].compToken,
+                  'COMP',
+                  chainId
+                );
+                
+                // Calculate annual COMP distribution for this market
+                const blocksPerYear = blocksPerDay[chainId] * 365;
+                const compRatePerYear = compSpeed.mul(ethers.BigNumber.from(blocksPerYear));
+                const compDistributionValue = parseFloat(ethers.utils.formatUnits(compRatePerYear, 18)) * compPrice;
+                
+                // Calculate COMP APY as distribution value / TVL
+                if (calculatedTvl > 0) {
+                  compApy = (compDistributionValue / calculatedTvl) * 100;
+                }
+              }
+            } catch (compError) {
+              logger.warn(`Error calculating COMP APY: ${compError.message}`);
+            }
+          }
+          
+          // Create yield opportunity object
+          const opportunity = {
+            name: `Compound ${cToken.underlying_symbol} Supply`,
+            asset: cToken.underlying_address || ethers.constants.AddressZero, // For CETH, use AddressZero
+            assetName: cToken.underlying_name,
+            assetSymbol: cToken.underlying_symbol,
+            assetDecimals: parseInt(cToken.underlying_decimals),
+            assetAddress: cToken.underlying_address || ethers.constants.AddressZero,
+            chainId,
+            apy: {
+              current: baseApy,
+              min7d: 0,
+              max7d: 0,
+              mean7d: 0,
+              compApy: compApy,
+              totalApy: baseApy + compApy
+            },
+            tvlUsd: calculatedTvl,
+            riskLevel: 'low', // Compound is generally considered low risk
+            strategyType: 'lending',
+            implementationDetails: {
+              contractAddress: cToken.token_address,
+              approvalAddress: cToken.token_address,
+              adapter: this.name,
+              methodName: 'mint',
+              withdrawMethodName: 'redeem',
+              underlyingPrice: underlyingPrice,
+              extraData: {
+                version: this.compoundVersion,
+                collateralFactor: ethers.utils.formatUnits(marketData.collateralFactorMantissa, 18),
+                isComped: marketData.isComped,
+                borrowCap: cToken.borrow_cap?.value || '0',
+                supplyCap: cToken.supply_cap?.value || '0',
+                reserveFactor: cToken.reserve_factor?.value || '0'
+              }
+            },
+            depositFee: 0, // Compound doesn't charge deposit fees
+            withdrawalFee: 0, // Compound doesn't charge withdrawal fees
+            harvestable: marketData.isComped, // If market is comped, COMP rewards can be harvested
+            compoundable: true, // Interest automatically compounds
+            autocompounding: true,
+            tags: ['lending', 'supply', 'compound', this.compoundVersion],
+            liquidityProfile: {
+              lockTime: 0, // No lock time for Compound deposits
+              withdrawalWindow: 'anytime',
+              unlockTime: null
+            },
+            status: 'active',
+            rewards: marketData.isComped ? [{
+              token: 'COMP',
+              tokenAddress: compoundAddresses[chainId].compToken,
+              apy: compApy
+            }] : []
+          };
+          
+          opportunities.push(opportunity);
+        } catch (error) {
+          logger.error(`Error processing Compound market ${cToken.symbol}: ${error.message}`);
+          // Continue with next cToken
+        }
+      }
+      
+      return opportunities;
+    } catch (error) {
+      logger.error(`Error getting Compound yield opportunities for chain ${chainId}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Gets APY data for a specific Compound opportunity
+   * @param {Object} opportunity - Yield opportunity object
+   * @returns {Promise<Object>} - APY data
+   */
+  async getApyData(opportunity) {
+    try {
+      const { chainId, implementationDetails } = opportunity;
+      
+      // Get cToken contract
+      const cTokenContract = this._getCTokenContract(chainId, implementationDetails.contractAddress);
+      
+      // Get current supply rate per block (on-chain)
+      const supplyRatePerBlock = await cTokenContract.supplyRatePerBlock();
+      
+      // Calculate current APY
+      const currentApy = this._calculateApyFromSupplyRate(supplyRatePerBlock, chainId);
+      
+      // Try to get historical APY data from Compound API
+      let historicalData = null;
+      
+      try {
+        // Fetch historical data for this market if available
+        const marketAddress = implementationDetails.contractAddress.toLowerCase();
+        const historicalApiUrl = `https://api.compound.finance/api/v2/market_history/graph?asset=${marketAddress}&min_block_timestamp=${Math.floor(Date.now()/1000) - 30*24*60*60}&max_block_timestamp=${Math.floor(Date.now()/1000)}&num_buckets=30`;
+        
+        const response = await axios.get(historicalApiUrl);
+        if (response.data && response.data.supply_rates && response.data.supply_rates.length > 0) {
+          historicalData = response.data.supply_rates;
+        }
+      } catch (histError) {
+        logger.warn(`Could not fetch historical APY data: ${histError.message}`);
+      }
+      
+      let apy = {
+        current: currentApy,
+        min7d: currentApy * 0.9, // Default approximate based on current rate
+        max7d: currentApy * 1.1,
+        mean7d: currentApy,
+        min30d: currentApy * 0.85,
+        max30d: currentApy * 1.15,
+        mean30d: currentApy
+      };
+      
+      // If we have real historical data, use it
+      if (historicalData && historicalData.length > 0) {
+        // For last 7 days (assuming data points are daily)
+        const last7d = historicalData.slice(-7);
+        if (last7d.length > 0) {
+          const rates7d = last7d.map(d => parseFloat(d.rate) * 100); // Convert to percentage
+          apy.min7d = Math.min(...rates7d);
+          apy.max7d = Math.max(...rates7d);
+          apy.mean7d = rates7d.reduce((a, b) => a + b, 0) / rates7d.length;
+        }
+        
+        // For last 30 days
+        const rates30d = historicalData.map(d => parseFloat(d.rate) * 100);
+        if (rates30d.length > 0) {
+          apy.min30d = Math.min(...rates30d);
+          apy.max30d = Math.max(...rates30d);
+          apy.mean30d = rates30d.reduce((a, b) => a + b, 0) / rates30d.length;
+        }
+      }
+      
+      // Enhance with COMP rewards if applicable
+      return this._enhanceWithCompRewards(apy, opportunity);
+    } catch (error) {
+      logger.error(`Error getting Compound APY data: ${error.message}`);
+      // Return basic APY data on error
+      return {
+        current: opportunity.apy?.current || 0,
+        min7d: 0,
+        max7d: 0,
+        mean7d: 0,
+        min30d: 0,
+        max30d: 0,
+        mean30d: 0
+      };
+    }
+  }
+
+  /**
+   * Gets TVL for a specific Compound opportunity
+   * @param {Object} opportunity - Yield opportunity object
+   * @returns {Promise<number>} - TVL in USD
+   */
+  async getTvl(opportunity) {
+    try {
+      const { chainId, asset, assetSymbol, assetDecimals, implementationDetails } = opportunity;
+      
+      // Get cToken contract
+      const cTokenContract = this._getCTokenContract(chainId, implementationDetails.contractAddress);
+      
+      // Get total supply of cTokens
+      const totalSupply = await cTokenContract.totalSupply();
+      
+      // Get exchange rate
+      const exchangeRateStored = await cTokenContract.exchangeRateStored();
+      
+      // Calculate total underlying
+      const totalUnderlying = totalSupply.mul(exchangeRateStored).div(ethers.BigNumber.from(10).pow(18));
+      const formattedUnderlying = parseFloat(ethers.utils.formatUnits(totalUnderlying, assetDecimals));
+      
+      // Get asset price from oracle
+      const assetPrice = await this._getAssetPrice(asset, assetSymbol, chainId);
+      
+      return formattedUnderlying * assetPrice;
+    } catch (error) {
+      logger.error(`Error getting Compound TVL: ${error.message}`);
+      // In case of error, fall back to any available value or return 0
+      return opportunity.tvlUsd || 0;
+    }
+  }
+
+  /**
+   * Deposits assets into a Compound market
+   * @param {Object} opportunity - Yield opportunity object
+   * @param {Object} params - Deposit parameters
+   * @returns {Promise<Object>} - Transaction data
+   */
+  async deposit(opportunity, params) {
+    try {
+      const { chainId, asset, assetDecimals, implementationDetails } = opportunity;
+      const { amount, userAddress, privateKey, gasPrice, gasLimit } = params;
+      
+      // Initialize provider and signer
+      const provider = this._getProvider(chainId);
+      const wallet = new ethers.Wallet(privateKey, provider);
+      
+      // Get cToken contract with signer
+      const cTokenContract = new ethers.Contract(
+        implementationDetails.contractAddress,
+        cTokenABI,
+        wallet
+      );
+      
+      // For ETH (cETH), handle differently
+      if (asset === ethers.constants.AddressZero) {
+        // Direct deposit with ETH
+        const mintTx = await cTokenContract.mint(
+          { value: amount, gasPrice, gasLimit: gasLimit || 250000 }
+        );
+        
+        // Wait for transaction to be mined
+        const receipt = await mintTx.wait();
+        
+        return {
+          transactionHash: receipt.transactionHash,
+          blockNumber: receipt.blockNumber,
+          gasUsed: receipt.gasUsed.toString(),
+          status: receipt.status === 1 ? 'success' : 'failed'
+        };
+      }
+      
+      // For ERC20 tokens, we need to approve first
+      const tokenContract = new ethers.Contract(
+        asset,
+        erc20ABI,
+        wallet
+      );
+      
+      // Check if approval is needed
+      const allowance = await tokenContract.allowance(userAddress, implementationDetails.contractAddress);
+      if (allowance.lt(amount)) {
+        const approvalTx = await tokenContract.approve(
+          implementationDetails.contractAddress,
+          ethers.constants.MaxUint256,
+          { gasPrice, gasLimit: gasLimit || 100000 }
+        );
+        await approvalTx.wait();
+        logger.info(`Approved Compound cToken for asset ${opportunity.assetSymbol}`);
+      }
+      
+      // Deposit into the cToken contract
+      const mintTx = await cTokenContract.mint(
+        amount,
+        { gasPrice, gasLimit: gasLimit || 250000 }
+      );
+      
+      // Wait for transaction to be mined
+      const receipt = await mintTx.wait();
+      
+      return {
+        transactionHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+        gasUsed: receipt.gasUsed.toString(),
+        status: receipt.status === 1 ? 'success' : 'failed'
+      };
+    } catch (error) {
+      logger.error(`Error depositing to Compound: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Withdraws assets from a Compound market
+   * @param {Object} investment - Investment object
+   * @param {Object} params - Withdrawal parameters
+   * @returns {Promise<Object>} - Transaction data
+   */
+  async withdraw(investment, params) {
+    try {
+      const { opportunity, walletAddress } = investment;
+      const { amount, privateKey, gasPrice, gasLimit, redeemType = 'underlying' } = params;
+      const { chainId, implementationDetails } = opportunity;
+      
+      // Initialize provider and signer
+      const provider = this._getProvider(chainId);
+      const wallet = new ethers.Wallet(privateKey, provider);
+      
+      // Get cToken contract with signer
+      const cTokenContract = new ethers.Contract(
+        implementationDetails.contractAddress,
+        cTokenABI,
+        wallet
+      );
+      
+      let withdrawTx;
+      
+      if (redeemType === 'underlying') {
+        // Withdraw exact amount of underlying token
+        withdrawTx = await cTokenContract.redeemUnderlying(
+          amount,
+          { gasPrice, gasLimit: gasLimit || 250000 }
+        );
+      } else {
+        // Withdraw by cToken amount
+        withdrawTx = await cTokenContract.redeem(
+          amount,
+          { gasPrice, gasLimit: gasLimit || 250000 }
+        );
+      }
+      
+      // Wait for transaction to be mined
+      const receipt = await withdrawTx.wait();
+      
+      return {
+        transactionHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+        gasUsed: receipt.gasUsed.toString(),
+        status: receipt.status === 1 ? 'success' : 'failed'
+      };
+    } catch (error) {
+      logger.error(`Error withdrawing from Compound: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Gets current balance of a Compound investment
+   * @param {Object} investment - Investment object
+   * @returns {Promise<Object>} - Balance data
+   */
+  async getBalance(investment) {
+    try {
+      const { opportunity, walletAddress } = investment;
+      const { chainId, asset, assetSymbol, assetDecimals, implementationDetails } = opportunity;
+      
+      // Get cToken contract
+      const cTokenContract = this._getCTokenContract(chainId, implementationDetails.contractAddress);
+      
+      // Get cToken balance
+      const cTokenBalance = await cTokenContract.balanceOf(walletAddress);
+      
+      // Get current exchange rate
+      const exchangeRateStored = await cTokenContract.exchangeRateStored();
+      
+      // Calculate underlying amount
+      const underlyingBalance = cTokenBalance
+        .mul(exchangeRateStored)
+        .div(ethers.BigNumber.from(10).pow(18));
+      
+      // Format underlying balance
+      const formattedBalance = ethers.utils.formatUnits(underlyingBalance, assetDecimals);
+      
+      // Get asset price from oracle
+      const assetPrice = await this._getAssetPrice(asset, assetSymbol, chainId);
+      const balanceUsd = parseFloat(formattedBalance) * assetPrice;
+      
+      return {
+        cTokenBalance: cTokenBalance.toString(),
+        amount: underlyingBalance.toString(),
+        amountFormatted: formattedBalance,
+        amountUsd: balanceUsd,
+        assetPrice: assetPrice
+      };
+    } catch (error) {
+      logger.error(`Error getting Compound investment balance: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Harvests COMP rewards from an investment
+   * @param {Object} investment - Investment object
+   * @returns {Promise<Object>} - Harvest transaction data
+   */
+  async harvest(investment) {
+    try {
+      const { opportunity, walletAddress } = investment;
+      const { chainId, implementationDetails } = opportunity;
+      
+      // Check if the market is comped (eligible for COMP rewards)
+      if (!implementationDetails.extraData.isComped) {
+        return {
+          status: 'not_applicable',
+          message: 'This market is not eligible for COMP rewards'
+        };
+      }
+      
+      // Initialize provider and signer
+      const provider = this._getProvider(chainId);
+      const wallet = new ethers.Wallet(investment.privateKey, provider);
+      
+      // Get comptroller contract with signer
+      const comptroller = new ethers.Contract(
+        compoundAddresses[chainId].comptroller,
+        comptrollerABI,
+        wallet
+      );
+      
+      // Check accrued COMP rewards
+      const compAccrued = await comptroller.compAccrued(walletAddress);
+      
+      if (compAccrued.eq(0)) {
+        return {
+          status: 'no_rewards',
+          message: 'No COMP rewards available to claim'
+        };
+      }
+      
+      // Claim COMP rewards
+      const claimTx = await comptroller.claimComp(walletAddress);
+      const receipt = await claimTx.wait();
+      
+      return {
+        transactionHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+        gasUsed: receipt.gasUsed.toString(),
+        status: receipt.status === 1 ? 'success' : 'failed',
+        compClaimed: ethers.utils.formatUnits(compAccrued, 18) // COMP has 18 decimals
+      };
+    } catch (error) {
+      logger.error(`Error harvesting COMP rewards: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Compounds yield for a Compound investment (not applicable as interest compounds automatically)
+   * @param {Object} investment - Investment object
+   * @returns {Promise<Object>} - Compound transaction data
+   */
+  async compound(investment) {
+    try {
+      // For Compound, compounding is not necessary since interest compounds automatically
+      logger.info(`Compounding not needed for Compound as interest compounds automatically`);
+      return {
+        status: 'not_applicable',
+        message: 'Compound interest compounds automatically, no manual compounding needed'
+      };
+    } catch (error) {
+      logger.error(`Error in Compound compound operation: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Gets transaction status
+   * @param {string} chainId - Chain ID
+   * @param {string} txHash - Transaction hash
+   * @returns {Promise<Object>} - Transaction status
+   */
+  async getTransactionStatus(chainId, txHash) {
+    try {
+      const provider = this._getProvider(chainId);
+      const tx = await provider.getTransaction(txHash);
+      
+      if (!tx) {
+        return { status: 'not_found' };
+      }
+      
+      if (!tx.blockNumber) {
+        return { status: 'pending' };
+      }
+      
+      const receipt = await provider.getTransactionReceipt(txHash);
+      
+      return {
+        status: receipt.status === 1 ? 'success' : 'failed',
+        blockNumber: receipt.blockNumber,
+        gasUsed: receipt.gasUsed.toString(),
+        confirmations: tx.confirmations
+      };
+    } catch (error) {
+      logger.error(`Error getting transaction status: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Validates an investment address
+   * @param {Object} opportunity - Yield opportunity object
+   * @param {string} address - Address to validate
+   * @returns {Promise<boolean>} - True if address is valid for this protocol
+   */
+  async validateAddress(opportunity, address) {
+    try {
+      // Check if address is a valid Ethereum address
+      return ethers.utils.isAddress(address);
+    } catch (error) {
+      logger.error(`Error validating address: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Gets gas cost estimate for a transaction
+   * @param {string} chainId - Chain ID
+   * @param {string} methodName - Contract method name
+   * @param {Array} params - Method parameters
+   * @returns {Promise<Object>} - Gas estimate data
+   */
+  async estimateGas(chainId, methodName, params) {
+    try {
+      const provider = this._getProvider(chainId);
+      
+      // Get cToken contract
+      const cTokenContract = this._getCTokenContract(chainId, params.cTokenAddress);
+      
+      let gasEstimate;
+      
+      switch (methodName) {
+        case 'mint':
+          if (params.asset === ethers.constants.AddressZero) {
+            // For ETH (cETH)
+            gasEstimate = await cTokenContract.estimateGas.mint({
+              value: params.amount
+            });
+          } else {
+            // For ERC20 tokens
+            gasEstimate = await cTokenContract.estimateGas.mint(params.amount);
+          }
+          break;
+        case 'redeem':
+          gasEstimate = await cTokenContract.estimateGas.redeem(params.amount);
+          break;
+        case 'redeemUnderlying':
+          gasEstimate = await cTokenContract.estimateGas.redeemUnderlying(params.amount);
+          break;
+        default:
+          throw new Error(`Method ${methodName} not supported for gas estimation`);
+      }
+      
+      // Get current gas price
+      const gasPrice = await provider.getGasPrice();
+      
+      // Calculate cost in ETH
+      const costWei = gasEstimate.mul(gasPrice);
+      const costEth = ethers.utils.formatEther(costWei);
+      
+      return {
+        gasEstimate: gasEstimate.toString(),
+        gasPrice: gasPrice.toString(),
+        costWei: costWei.toString(),
+        costEth
+      };
+    } catch (error) {
+      logger.error(`Error estimating gas: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Gets COMP distribution speed for a market
+   * @param {string} chainId - Chain ID
+   * @param {string} cTokenAddress - cToken address
+   * @returns {Promise<ethers.BigNumber>} - COMP per block
+   * @private
+   */
+  async _getCompSpeed(chainId, cTokenAddress) {
+    try {
+      const comptroller = this._getComptrollerContract(chainId);
+      
+      // Try compSupplySpeeds first (newer versions of Comptroller)
+      try {
+        const compSpeed = await comptroller.compSupplySpeeds(cTokenAddress);
+        return compSpeed;
+      } catch (error) {
+        // Fallback to compSpeeds for older versions
+        const compSpeed = await comptroller.compSpeeds(cTokenAddress);
+        return compSpeed;
+      }
+    } catch (error) {
+      logger.error(`Error getting COMP speed: ${error.message}`);
+      return ethers.BigNumber.from(0);
+    }
+  }
+
+  /**
+   * Enhance APY data with COMP rewards
+   * @param {Object} apy - Base APY data object
+   * @param {Object} opportunity - Yield opportunity
+   * @returns {Promise<Object>} - Enhanced APY data with COMP rewards
+   * @private
+   */
+  async _enhanceWithCompRewards(apy, opportunity) {
+    try {
+      const { chainId, implementationDetails } = opportunity;
+      
+      // Skip if market is not comped
+      if (!implementationDetails.extraData.isComped) {
+        return {
+          ...apy,
+          compApy: 0,
+          totalApy: apy.current
+        };
+      }
+      
+      // Get COMP distribution speed for this market
+      const compSpeed = await this._getCompSpeed(chainId, implementationDetails.contractAddress);
+      
+      // If no COMP is being distributed to this market
+      if (compSpeed.isZero()) {
+        return {
+          ...apy,
+          compApy: 0,
+          totalApy: apy.current
+        };
+      }
+      
+      // Get market size (TVL)
+      const marketSize = await this.getTvl(opportunity);
+      
+      // Get COMP price
+      const compPrice = await this._getAssetPrice(
+        compoundAddresses[chainId].compToken,
+        'COMP',
+        chainId
+      );
+      
+      // Calculate annual COMP distribution
+      const blocksPerYear = blocksPerDay[chainId] * 365;
+      const compPerYear = compSpeed.mul(ethers.BigNumber.from(blocksPerYear));
+      const compPerYearFormatted = parseFloat(ethers.utils.formatUnits(compPerYear, 18));
+      const compValuePerYear = compPerYearFormatted * compPrice;
+      
+      // Calculate COMP APY (annualized value of rewards / TVL)
+      let compApy = 0;
+      if (marketSize > 0) {
+        compApy = (compValuePerYear / marketSize) * 100; // Convert to percentage
+      }
+      
+      return {
+        ...apy,
+        compApy: parseFloat(compApy.toFixed(2)),
+        totalApy: parseFloat((apy.current + compApy).toFixed(2))
+      };
+    } catch (error) {
+      logger.error(`Error calculating COMP rewards APY: ${error.message}`);
+      return {
+        ...apy,
+        compApy: 0,
+        totalApy: apy.current
+      };
+    }
+  }
+
+  /**
+   * Gets price for an asset from configured oracles
+   * @param {string} assetAddress - Asset contract address
+   * @param {string} assetSymbol - Asset symbol
+   * @param {string} chainId - Chain ID
+   * @returns {Promise<number>} - Asset price in USD
+   * @private
+   */
+  async _getAssetPrice(assetAddress, assetSymbol, chainId) {
+    try {
+      // Check cache first
+      const cacheKey = `${chainId}:${assetAddress}`;
+      if (priceCache.data.has(cacheKey) && 
+          priceCache.expiry.has(cacheKey) && 
+          priceCache.expiry.get(cacheKey) > Date.now()) {
+        return priceCache.data.get(cacheKey);
+      }
+
+      // Normalize asset symbol
+      const symbol = assetSymbol?.toLowerCase();
+      
+      // Attempt to get price from primary oracle (CoinGecko)
+      if (this.priceOracle.primary === 'coingecko') {
+        try {
+          const baseUrl = priceOracles.coingecko.proPlan ? 
+            priceOracles.coingecko.proUrl : 
+            priceOracles.coingecko.baseUrl;
+          
+          // Prepare query parameters
+          const params = new URLSearchParams({
+            contract_addresses: assetAddress,
+            vs_currencies: 'usd'
+          });
+          
+          // Add API key if using pro plan
+          if (priceOracles.coingecko.proPlan) {
+            params.append('x_cg_pro_api_key', priceOracles.coingecko.apiKey);
+          }
+          
+          const url = `${baseUrl}${priceOracles.coingecko.pricePath}?${params.toString()}`;
+          const response = await axios.get(url);
+          
+          // Response format: { contract_address: { usd: price } }
+          if (response.data && response.data[assetAddress.toLowerCase()]?.usd) {
+            const price = response.data[assetAddress.toLowerCase()].usd;
+            
+            // Cache the result
+            priceCache.data.set(cacheKey, price);
+            priceCache.expiry.set(cacheKey, Date.now() + this.priceOracle.cacheDuration);
+            
+            return price;
+          }
+        } catch (coingeckoError) {
+          logger.warn(`CoinGecko price fetch error: ${coingeckoError.message}`);
+          // Continue to next price source
+        }
+      }
+      
+      // Try Chainlink price feed if available
+      if (this.priceOracle.secondary === 'chainlink') {
+        try {
+          let priceFeedAddress;
+          
+          // Map common assets to their Chainlink price feeds
+          if (symbol === 'eth' || assetAddress === ethers.constants.AddressZero) {
+            priceFeedAddress = priceOracles.chainlink.ethUsd;
+          } else if (symbol === 'dai') {
+            priceFeedAddress = priceOracles.chainlink.daiUsd;
+          } else if (symbol === 'usdc') {
+            priceFeedAddress = priceOracles.chainlink.usdcUsd;
+          } else if (symbol === 'wbtc') {
+            priceFeedAddress = priceOracles.chainlink.wbtcUsd;
+          } else if (symbol === 'comp') {
+            priceFeedAddress = priceOracles.chainlink.compUsd;
+          }
+          
+          if (priceFeedAddress) {
+            const provider = this._getProvider(chainId);
+            const priceFeed = new ethers.Contract(priceFeedAddress, priceOracles.chainlink.abi, provider);
+            
+            // Get latest price data
+            const [, answer, , updatedAt, ] = await priceFeed.latestRoundData();
+            const decimals = await priceFeed.decimals();
+            
+            // Check if price is stale (more than 24 hours old)
+            const timestamp = updatedAt.toNumber();
+            if (Math.floor(Date.now() / 1000) - timestamp > 86400) {
+              logger.warn(`Chainlink price for ${symbol} is stale: ${timestamp}`);
+              throw new Error('Stale price data');
+            }
+            
+            // Calculate price with proper decimals
+            const price = parseFloat(ethers.utils.formatUnits(answer, decimals));
+            
+            // Cache the result
+            priceCache.data.set(cacheKey, price);
+            priceCache.expiry.set(cacheKey, Date.now() + this.priceOracle.cacheDuration);
+            
+            return price;
+          }
+        } catch (chainlinkError) {
+          logger.warn(`Chainlink price fetch error: ${chainlinkError.message}`);
+          // Continue to fallback
+        }
+      }
+      
+      // Try fallback price source (DeFi Llama)
+      if (this.priceOracle.fallback === 'defillama') {
+        try {
+          const url = `${priceOracles.defillama.baseUrl}${priceOracles.defillama.pricePath}/${chainId}:${assetAddress}`;
+          const response = await axios.get(url);
+          
+          // Response format: { coins: { 'chainId:address': { price: X } } }
+          const key = `${chainId}:${assetAddress.toLowerCase()}`;
+          if (response.data && response.data.coins && response.data.coins[key]?.price) {
+            const price = response.data.coins[key].price;
+            
+            // Cache the result
+            priceCache.data.set(cacheKey, price);
+            priceCache.expiry.set(cacheKey, Date.now() + this.priceOracle.cacheDuration);
+            
+            return price;
+          }
+        } catch (defillamaError) {
+          logger.warn(`DeFi Llama price fetch error: ${defillamaError.message}`);
+        }
+      }
+      
+      // Handle special cases
+      if (symbol === 'usdc' || symbol === 'usdt' || symbol === 'dai' || symbol === 'tusd' || 
+          symbol === 'busd' || symbol === 'gusd' || symbol.includes('usd')) {
+        // Stablecoins are generally pegged to $1
+        priceCache.data.set(cacheKey, 1);
+        priceCache.expiry.set(cacheKey, Date.now() + this.priceOracle.cacheDuration);
+        return 1;
+      }
+      
+      // If all attempts fail, log the issue and return a fallback price
+      logger.error(`Failed to get price for ${assetSymbol} (${assetAddress}) on chain ${chainId}`);
+      return 0; // Could not determine price
+    } catch (error) {
+      logger.error(`Error in price oracle: ${error.message}`);
+      return 0; // Default fallback
+    }
+  }
+}
+
+module.exports = CompoundAdapter;

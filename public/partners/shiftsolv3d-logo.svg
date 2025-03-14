@@ -1,0 +1,6 @@
+<svg width="200" height="60" viewBox="0 0 200 60" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="200" height="60" rx="4" fill="#111111"/>
+  <path d="M35 20L30 25L40 35L30 45H40L50 35L40 25L45 20H35Z" fill="#E6007A"/>
+  <path d="M25 20L15 30L25 40L20 45H10L5 40L15 30L5 20H15L25 20Z" fill="#00B2FF"/>
+  <text x="65" y="37" font-family="Arial, sans-serif" font-weight="bold" font-size="16" fill="white">ShiftSolv3d</text>
+</svg>
